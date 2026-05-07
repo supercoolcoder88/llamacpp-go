@@ -1,0 +1,3 @@
+# Limitations
+- Does not include tool calling
+- Response does not get streamed back
