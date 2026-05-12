@@ -3,23 +3,13 @@ package llama
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
+	"fmt"
+	"io"
 	"net/http"
 )
 
-type LlamaClient struct {
-	Host string
-}
-
-func NewLlamaClient(url string) *LlamaClient {
-	return &LlamaClient{Host: url}
-}
-
-type ChatCompletionRequest struct {
-	Model       string    `json:"model"`
-	Messages    []Message `json:"messages"`
-	Temperature float64   `json:"temperature,omitempty"`
-	MaxTokens   int       `json:"max_tokens,omitempty"`
+type Client struct {
+	baseURL string
 }
 
 type Message struct {
@@ -27,51 +17,91 @@ type Message struct {
 	Content string `json:"content"`
 }
 
-type ChatCompletionResponse struct {
-	ID      string   `json:"id"`
-	Choices []Choice `json:"choices"`
-	Usage   Usage    `json:"usage"`
+type responseFormat struct {
+	Type string `json:"type"`
 }
 
-type Choice struct {
-	Index        int     `json:"index"`
-	FinishReason string  `json:"finish_reason"`
-	Message      Message `json:"message"`
+type chatRequest struct {
+	Model          string          `json:"model"`
+	Messages       []Message       `json:"messages"`
+	ResponseFormat *responseFormat `json:"response_format,omitempty"`
 }
 
-type Usage struct {
-	CompletionTokens int `json:"completion_tokens"`
-	PromptTokens     int `json:"prompt_tokens"`
-	TotalTokens      int `json:"total_tokens"`
+type chatResponse struct {
+	Choices []struct {
+		Message Message `json:"message"`
+	} `json:"choices"`
 }
 
-func (c *LlamaClient) Chat(messages []Message, temperature float64, maxTokens int) (*ChatCompletionResponse, error) {
-	if temperature < 0 || temperature > 2 {
-		return nil, errors.New("temperature must be between 0 and 2")
+func New(baseURL string) *Client {
+	return &Client{
+		baseURL: baseURL,
+	}
+}
+
+func (c *Client) Chat(model string, messages []Message) (string, error) {
+	req := chatRequest{
+		Model:    model,
+		Messages: messages,
 	}
 
-	if maxTokens <= 0 {
-		return nil, errors.New("max tokens must be greater than 0")
+	return c.doChat(req)
+}
+
+func (c *Client) ChatJSON(model string, messages []Message) (string, error) {
+	req := chatRequest{
+		Model:    model,
+		Messages: messages,
+		ResponseFormat: &responseFormat{
+			Type: "json_object",
+		},
 	}
 
-	body, err := json.Marshal(&ChatCompletionRequest{
-		Model:       "llama.cpp",
-		Messages:    messages,
-		Temperature: temperature,
-		MaxTokens:   maxTokens,
-	})
+	return c.doChat(req)
+}
+
+func (c *Client) doChat(reqBody chatRequest) (string, error) {
+	body, err := json.Marshal(reqBody)
 
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 
-	r, err := http.Post(c.Host+"/v1/chat/completions", "application/json", bytes.NewBuffer(body))
+	resp, err := http.Post(
+		fmt.Sprintf("%s/v1/chat/completions", c.baseURL),
+		"application/json",
+		bytes.NewBuffer(body),
+	)
+
 	if err != nil {
-		return nil, err
+		return "", err
 	}
-	defer r.Body.Close()
 
-	var response ChatCompletionResponse
+	defer resp.Body.Close()
 
-	return &response, json.NewDecoder(r.Body).Decode(&response)
+	respBody, err := io.ReadAll(resp.Body)
+
+	if err != nil {
+		return "", err
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf(
+			"llama.cpp returned status %d: %s",
+			resp.StatusCode,
+			string(respBody),
+		)
+	}
+
+	var chatResp chatResponse
+
+	if err := json.Unmarshal(respBody, &chatResp); err != nil {
+		return "", err
+	}
+
+	if len(chatResp.Choices) == 0 {
+		return "", fmt.Errorf("no choices returned")
+	}
+
+	return chatResp.Choices[0].Message.Content, nil
 }
